@@ -3,17 +3,16 @@ lift2d.py
 =========
 2D Lift environment — self-contained (env + teleop demo).
 
-Follows the same structure as multi_push_fully_observable.py:
-  obs, reward, done, info = env.step(act)
+env structure:  obs, reward, done, info = env.step(act)
 
 Agent : Parallel gripper  (kinematic base + left & right finger bodies)
 Object: Square block      (dynamic, subject to gravity)
 Obs   : dict with keys
-            'image'     – (3, H, W) float32 RGB, normalised to [0, 1]
-            'agent_pos' – (2,) float32 base position in world coords
+            'image':     (3, H, W) float32 RGB, normalised to [0, 1]
+            'agent_pos': (2,) float32 base position in world coords
 Action: (tx, ty, grip)
-            tx, ty – absolute target position for base this step (world units)
-            grip   – float in [-1, +1]
+            tx, ty:  absolute target position for base this step (world units)
+            grip:    float in [-1, +1]
                        > 0.3  → close fingers / maintain grasp
                        ≤ 0.3  → open  fingers / release
 Reward: 1.0 while grasped, 0.0 otherwise
