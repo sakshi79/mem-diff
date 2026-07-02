@@ -178,12 +178,12 @@ class Lift2DEnv(gym.Env):
         self._setup()
         state = self.reset_to_state
         if state is None:
-            rs  = np.random.RandomState(seed=self._seed)
+            rs  = self.np_random
             ws  = self.window_size
-            bx  = float(rs.randint(100, ws - 100))
-            by  = float(rs.randint(ws - 160, ws - 60))  # near floor (large y)
-            gx  = float(rs.randint(100, ws - 100))
-            gy  = float(rs.randint(ws // 4, ws // 2))   # upper half (small y)
+            bx  = float(rs.integers(100, ws - 100))
+            by  = float(rs.integers(ws - 160, ws - 60))  # near floor (large y)
+            gx  = float(rs.integers(100, ws - 100))
+            gy  = float(rs.integers(ws // 4, ws // 2))   # upper half (small y)
             state = np.array([gx, gy, bx, by], dtype=np.float32)
         self._set_state(state)
         return self._get_obs()
