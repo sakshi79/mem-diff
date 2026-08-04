@@ -1,12 +1,13 @@
 """
-lift2d.py
-=========
-2D Lift environment — self-contained (env + teleop demo).
+pickplace2d.py
+==============
+2D Pick-and-Place environment — self-contained (env + teleop demo).
 
 env structure:  obs, reward, done, info = env.step(act)
 
 Agent : Parallel gripper  (kinematic base + left & right finger bodies)
-Object: Square block      (dynamic, subject to gravity)
+Object: Can               (dynamic, subject to gravity)
+Target: Colored box / bin (static container on the floor)
 Obs   : dict with keys
             'image':     (3, H, W) float32 RGB, normalised to [0, 1]
             'agent_pos': (2,) float32 base position in world coords
@@ -15,7 +16,8 @@ Action: (tx, ty, grip)
             grip:    float in [-1, +1]
                        > 0.3  → close fingers / maintain grasp
                        ≤ 0.3  → open  fingers / release
-Reward: 1.0 while grasped, 0.0 otherwise
+Reward: 1.0 while the can is resting inside the target box (and released),
+        0.0 otherwise
 Done  : False (open-ended; reset manually)
 
 Coordinate system
@@ -26,17 +28,17 @@ y increases DOWNWARD.  Gravity therefore points in the +y direction.
 
 Controls (teleop demo)
 ----------------------
-  Mouse hover      – move gripper toward cursor
-  Left click       – close / open gripper (toggle)
+  Left-click drag  – move gripper toward cursor
   ↑ ↓ ← →         – also move gripper (additive with mouse)
+  Right click      – toggle gripper open / closed
   Space (toggle)   – also open / close gripper
   R                – reset episode
   Q / Escape       – quit
 
 Usage
 -----
-  python lift2d.py                  # interactive teleop
-  python lift2d.py -o data/lift.zarr  # teleop + record to zarr
+  python pickplace2d.py                       # interactive teleop
+  python pickplace2d.py -o data/pickplace.zarr  # teleop + record to zarr
 """
 
 from __future__ import annotations
@@ -62,9 +64,10 @@ from diffusion_policy.env.pusht.replay_buffer import ReplayBuffer
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _make_wall(static_body: pymunk.Body, a, b, radius: float = 3) -> pymunk.Segment:
-    seg = pymunk.Segment(static_body, a, b, radius)   # initialize a Pymunk segment
-    seg.color = pygame.Color("LightGray")
+def _make_wall(static_body: pymunk.Body, a, b, radius: float = 3,
+               color: str = "LightGray") -> pymunk.Segment:
+    seg = pymunk.Segment(static_body, a, b, radius)
+    seg.color = pygame.Color(color)
     seg.elasticity = 0.1
     seg.friction = 0.8
     return seg
@@ -74,27 +77,33 @@ def _make_wall(static_body: pymunk.Body, a, b, radius: float = 3) -> pymunk.Segm
 # Environment
 # ---------------------------------------------------------------------------
 
-class Lift2DEnv(gym.Env):
-    """2D parallel-gripper lift task."""
+class PickPlace2DEnv(gym.Env):
+    """2D parallel-gripper pick-and-place task.
+
+    Pick the can up from its start position and drop it inside the colored
+    target box that sits on the floor.
+    """
 
     metadata = {
         "render.modes": ["human", "rgb_array"],
         "video.frames_per_second": 10,
     }
     reward_range = (0.0, 1.0)
-    # reward = 1.0 on successful grasp, 0.0 otherwise 
-
+    # reward = 1.0 while the can rests inside the target box, 0.0 otherwise
 
     def __init__(
         self,
-        render_size: int = 96,  # image size returned to the policy
-        window_size: int = 512,  # size of physical world and display
+        render_size: int = 96,
+        window_size: int = 512,
         finger_length: float = 60.0,
         finger_width: float = 14.0,
-        finger_gap_max: float = 42.0,   # distance from center of gripper (base) to one finger
+        finger_gap_max: float = 42.0,
         finger_gap_min: float = 18.0,
-        block_size: float = 36.0,
+        can_width: float = 26.0,
+        can_height: float = 40.0,
         grasp_threshold: float = 58.0,
+        bin_half_width: float = 55.0,
+        bin_wall_height: float = 70.0,
         render_action: bool = True,
         reset_to_state=None,
     ):
@@ -108,8 +117,11 @@ class Lift2DEnv(gym.Env):
         self.finger_width   = finger_width
         self.finger_gap_max = finger_gap_max
         self.finger_gap_min = finger_gap_min
-        self.block_size     = block_size
+        self.can_width      = can_width
+        self.can_height     = can_height
         self.grasp_threshold = grasp_threshold
+        self.bin_half_width  = bin_half_width
+        self.bin_wall_height = bin_wall_height
         self.render_action  = render_action
         self.reset_to_state = reset_to_state
 
@@ -120,10 +132,11 @@ class Lift2DEnv(gym.Env):
         self.k_v        = 30.0
 
         # Runtime state
-        self._grip_value:  float                    = -1.0
-        self._grasp_joints: list[pymunk.Constraint] | None = None
-        self.n_contact_points: int                  = 0
-        self.latest_action: np.ndarray | None       = None
+        self._grip_value:  float                          = -1.0
+        self._grasp_joint: pymunk.Constraint | None       = None
+        self.n_contact_points: int                        = 0
+        self.latest_action: np.ndarray | None             = None
+        self.target_pos:   Vec2d | None                   = None
 
         # PyGame handles (created lazily in render_frame)
         self.window = None
@@ -135,10 +148,10 @@ class Lift2DEnv(gym.Env):
         self.base_body:  pymunk.Body  | None = None
         self.left_body:  pymunk.Body  | None = None
         self.right_body: pymunk.Body  | None = None
-        self.block:      pymunk.Body  | None = None
+        self.can:        pymunk.Body  | None = None
 
         # ------------------------------------------------------------------
-        # Gym spaces  (convention: CHW float32 image)
+        # Gym spaces  (matching multi_push convention: CHW float32 image)
         # ------------------------------------------------------------------
         self.observation_space = spaces.Dict({
             'image': spaces.Box(
@@ -180,11 +193,15 @@ class Lift2DEnv(gym.Env):
         if state is None:
             rs  = self.np_random
             ws  = self.window_size
-            bx  = float(rs.integers(100, ws - 100))
-            by  = float(rs.integers(ws - 160, ws - 60))  # near floor (large y)
+            # Can starts on the floor on one side
+            cx  = float(rs.integers(90, ws // 2 - 40))
+            cy  = float(ws - 60)                          # resting on floor
+            # Target box sits on the floor on the other side, clear of the can
+            tx  = float(rs.integers(ws // 2 + 60, ws - 90))
+            # Gripper starts up high
             gx  = float(rs.integers(100, ws - 100))
-            gy  = float(rs.integers(ws // 4, ws // 2))   # upper half (small y)
-            state = np.array([gx, gy, bx, by], dtype=np.float32)
+            gy  = float(rs.integers(ws // 4, ws // 2))
+            state = np.array([gx, gy, cx, cy, tx], dtype=np.float32)
         self._set_state(state)
         return self._get_obs()
 
@@ -226,7 +243,8 @@ class Lift2DEnv(gym.Env):
 
                 self.space.step(dt)
 
-        reward      = 1.0 if self._grasp_joints is not None else 0.0
+        placed      = self._is_placed()
+        reward      = 1.0 if placed else 0.0
         done        = False          # open-ended; caller decides when to stop
         observation = self._get_obs()
         info        = self._get_info()
@@ -234,6 +252,24 @@ class Lift2DEnv(gym.Env):
         assert observation is not None, "env._get_obs() returned None"
         assert info       is not None, "env._get_info() returned None"
         return observation, reward, done, info
+
+    # ------------------------------------------------------------------
+    # Placement check
+    # ------------------------------------------------------------------
+
+    def _is_placed(self) -> bool:
+        """True when the can rests inside the target box and is released."""
+        if self.can is None or self.target_pos is None:
+            return False
+        cx, cy = self.can.position
+        # Horizontally within the bin interior
+        in_x = abs(cx - self.target_pos.x) < self.bin_half_width
+        # Low enough to be sitting inside the bin (near the floor)
+        on_floor = cy > (self.window_size - 30 - self.can_height / 2)
+        # Must be released (not currently grasped) and roughly still
+        released = self._grasp_joint is None
+        slow = self.can.velocity.length < 25.0
+        return bool(in_x and on_floor and released and slow)
 
     # ------------------------------------------------------------------
     # Render
@@ -249,7 +285,7 @@ class Lift2DEnv(gym.Env):
             pygame.init()
             pygame.display.init()
             self.window = pygame.display.set_mode((ws, ws))
-            pygame.display.set_caption("2D Lift Env — Parallel Gripper")
+            pygame.display.set_caption("2D Pick & Place — Parallel Gripper")
         if self.clock is None and mode == "human":
             self.clock = pygame.time.Clock()
 
@@ -257,7 +293,22 @@ class Lift2DEnv(gym.Env):
         canvas.fill((24, 24, 30))
         self.screen = canvas
 
-        # Physics debug draw
+        # Target box floor pad (drawn under the physics debug draw)
+        if self.target_pos is not None:
+            placed = self._is_placed()
+            pad_color = (60, 170, 90) if placed else (70, 90, 150)
+            tx = self.target_pos.x
+            pad = pygame.Rect(
+                round(tx - self.bin_half_width),
+                round(ws - 8 - self.bin_wall_height),
+                round(2 * self.bin_half_width),
+                round(self.bin_wall_height),
+            )
+            surf = pygame.Surface((pad.width, pad.height), pygame.SRCALPHA)
+            surf.fill((*pad_color, 70))
+            canvas.blit(surf, (pad.left, pad.top))
+
+        # Physics debug draw (walls, bin, fingers, can)
         draw_options = DrawOptions(canvas)
         self.space.debug_draw(draw_options)
 
@@ -279,8 +330,10 @@ class Lift2DEnv(gym.Env):
                 pygame.font.init()
             font = pygame.font.SysFont("monospace", 12)
 
-            if self._grasp_joints is not None:
+            if self._grasp_joint is not None:
                 canvas.blit(font.render("● GRASPED", True, (255, 220, 50)), (10, 10))
+            if self._is_placed():
+                canvas.blit(font.render("✔ PLACED", True, (90, 230, 130)), (10, 26))
 
             # Grip bar
             bar_x, bar_y, bar_w, bar_h = 10, ws - 22, 140, 12
@@ -370,14 +423,15 @@ class Lift2DEnv(gym.Env):
         }
 
     def _get_info(self) -> dict:
-        n_steps = self.sim_hz // self.control_hz
         return {
             "pos_agent":  np.array(self.base_body.position, dtype=np.float32),
             "vel_agent":  np.array(self.base_body.velocity, dtype=np.float32),
-            "block_pose": np.array(
-                list(self.block.position) + [self.block.angle], dtype=np.float32
+            "can_pose":   np.array(
+                list(self.can.position) + [self.can.angle], dtype=np.float32
             ),
+            "target_pos": np.array(self.target_pos, dtype=np.float32),
             "grasped":    self._grasp_joint is not None,
+            "placed":     self._is_placed(),
             "grip":       float(self._grip_value),
             "n_contacts": int(np.ceil(self.n_contact_points /
                                       (self.sim_hz // self.control_hz))),
@@ -394,7 +448,7 @@ class Lift2DEnv(gym.Env):
         self.space = pymunk.Space()
         # positive_y_is_up = False → y=0 TOP, gravity pulls to larger y
         self.space.gravity = (0.0, 900.0)
-        self.space.damping = 0.995  # mild air resistance 
+        self.space.damping = 0.75
 
         ws = self.window_size
 
@@ -418,21 +472,43 @@ class Lift2DEnv(gym.Env):
         self.left_body,  self.left_shape  = self._make_finger("left")
         self.right_body, self.right_shape = self._make_finger("right")
 
-        # Square block (dynamic)
+        # Can (dynamic) — created in _set_state so it lands at the pick position
         mass    = 1.0
-        inertia = pymunk.moment_for_box(mass, (self.block_size, self.block_size))
-        self.block = pymunk.Body(mass, inertia)
-        self.block.position = Vec2d(ws / 2, ws - 80)
-        block_shape = pymunk.Poly.create_box(self.block, (self.block_size, self.block_size))
-        block_shape.friction   = 1.5
-        block_shape.elasticity = 0.05
-        block_shape.color      = pygame.Color("Tomato")
-        self.space.add(self.block, block_shape)
+        inertia = pymunk.moment_for_box(mass, (self.can_width, self.can_height))
+        self.can = pymunk.Body(mass, inertia)
+        self.can.position = Vec2d(ws / 2, ws - 80)
+        can_shape = pymunk.Poly.create_box(self.can, (self.can_width, self.can_height))
+        can_shape.friction   = 1.5
+        can_shape.elasticity = 0.05
+        can_shape.color      = pygame.Color("Goldenrod")
+        self.space.add(self.can, can_shape)
+
+        # Target bin walls are (re)built once the target position is known
+        self.target_pos   = None
+        self._bin_shapes  = []
 
         # Collision counter
         self.n_contact_points = 0
         ch = self.space.add_collision_handler(0, 0)
         ch.post_solve = self._handle_collision
+
+    def _build_bin(self, tx: float):
+        """Create the colored target box (two side walls) at floor x=tx."""
+        ws = self.window_size
+        floor_y = ws - 5
+        top_y   = floor_y - self.bin_wall_height
+        left_x  = tx - self.bin_half_width
+        right_x = tx + self.bin_half_width
+
+        left_wall  = _make_wall(self.space.static_body,
+                                (left_x, floor_y), (left_x, top_y),
+                                radius=4, color="MediumSeaGreen")
+        right_wall = _make_wall(self.space.static_body,
+                                (right_x, floor_y), (right_x, top_y),
+                                radius=4, color="MediumSeaGreen")
+        self.space.add(left_wall, right_wall)
+        self._bin_shapes = [left_wall, right_wall]
+        self.target_pos  = Vec2d(tx, floor_y - self.bin_wall_height / 2)
 
     def _make_finger(self, side: str):
         sign = -1.0 if side == "left" else 1.0
@@ -471,16 +547,16 @@ class Lift2DEnv(gym.Env):
         grip_closed = self._grip_value > 0.3
 
         if grip_closed and self._grasp_joint is None:
-            block_pos = Vec2d(*self.block.position)
+            can_pos = Vec2d(*self.can.position)
             # Fingertip faces downward (large y) → tip at +finger_length/2
             left_tip  = self.left_body.position  + Vec2d(0, +self.finger_length / 2)
             right_tip = self.right_body.position + Vec2d(0, +self.finger_length / 2)
-            dist = min((block_pos - left_tip).length,
-                       (block_pos - right_tip).length)
+            dist = min((can_pos - left_tip).length,
+                       (can_pos - right_tip).length)
 
             if dist < self.grasp_threshold:
-                anchor_base  = self.base_body.world_to_local(Vec2d(*self.block.position))
-                joint = pymunk.PinJoint(self.base_body, self.block,
+                anchor_base  = self.base_body.world_to_local(Vec2d(*self.can.position))
+                joint = pymunk.PinJoint(self.base_body, self.can,
                                         anchor_base, Vec2d(0, 0))
                 joint.max_force   = 6000.0
                 self._grasp_joint = joint
@@ -495,13 +571,14 @@ class Lift2DEnv(gym.Env):
     # ------------------------------------------------------------------
 
     def _set_state(self, state):
-        """Set world state from [gripper_x, gripper_y, block_x, block_y]."""
-        gx, gy, bx, by = (float(v) for v in state[:4])
+        """Set world state from [gripper_x, gripper_y, can_x, can_y, target_x]."""
+        gx, gy, cx, cy, tx = (float(v) for v in state[:5])
         self.base_body.position = Vec2d(gx, gy)
         self.base_body.velocity = Vec2d(0, 0)
-        self.block.position     = Vec2d(bx, by)
-        self.block.velocity     = Vec2d(0, 0)
-        self.block.angle        = 0.0
+        self.can.position       = Vec2d(cx, cy)
+        self.can.velocity       = Vec2d(0, 0)
+        self.can.angle          = 0.0
+        self._build_bin(tx)
         self._update_fingers()
         self.space.step(1.0 / self.sim_hz)
 
@@ -514,7 +591,7 @@ class Lift2DEnv(gym.Env):
 
 
 # ---------------------------------------------------------------------------
-# Teleop demo  (mirrors multi_push_fully_observable.py main())
+# Teleop demo  (mirrors lift2d.py main())
 # ---------------------------------------------------------------------------
 
 @click.command()
@@ -524,7 +601,11 @@ class Lift2DEnv(gym.Env):
 @click.option("--window",      default=512, type=int, show_default=True)
 def main(output, render_size, window):
     """
-    Interactive teleop demo for Lift2DEnv.
+    Interactive teleop demo for PickPlace2DEnv.
+
+    Goal
+    ----
+      Pick the can (gold) off the floor and drop it inside the green box.
 
     Movement
     --------
@@ -554,8 +635,8 @@ def main(output, render_size, window):
             seed = 0
 
         # --- Build env ---
-        env = Lift2DEnv(render_size=render_size, window_size=window,
-                        render_action=True)
+        env = PickPlace2DEnv(render_size=render_size, window_size=window,
+                             render_action=True)
         env.seed(seed)
         agent = env.teleop_agent()
         clock = pygame.time.Clock()
@@ -568,15 +649,16 @@ def main(output, render_size, window):
         retry   = False
         done    = False
         grip_closed = False
-        
+
         # Track target position for keyboard teleop
         tx = float(env.base_body.position.x)
         ty = float(env.base_body.position.y)
 
-        pygame.display.set_caption(f"Lift2D  plan_idx:{plan_idx}")
+        pygame.display.set_caption(f"PickPlace2D  plan_idx:{plan_idx}")
 
         print("=" * 58)
-        print("  2D Lift Env — Teleop Demo")
+        print("  2D Pick & Place Env — Teleop Demo")
+        print("  Goal: drop the gold can into the green box")
         print("  Left-click drag   : move gripper toward cursor")
         print("  Right click       : toggle gripper open / closed")
         print("  ↑ ↓ ← → (additive): also move gripper")
@@ -632,12 +714,14 @@ def main(output, render_size, window):
 
             # ── Terminal HUD ─────────────────────────────────────────
             grasped_str = "GRASPED ●" if info["grasped"] else "         "
+            placed_str  = "PLACED ✔" if info["placed"] else "        "
             grip_str    = "CLOSED" if grip_closed else "open  "
-            state_vec   = np.concatenate([info["pos_agent"], info["block_pose"]])
+            state_vec   = np.concatenate([info["pos_agent"], info["can_pose"],
+                                          info["target_pos"]])
             print(
                 f"\r  rew={reward:.3f}  "
-                f"block_y={info['block_pose'][1]:5.1f}  "
-                f"grip={grip_str}  {grasped_str}  ",
+                f"can_x={info['can_pose'][0]:5.1f}  "
+                f"grip={grip_str}  {grasped_str}  {placed_str}  ",
                 end="", flush=True,
             )
 
@@ -661,7 +745,7 @@ def main(output, render_size, window):
             print(f"Saved episode {seed}  ({len(episode)} steps)")
         elif retry:
             print("Retrying episode...")
-        
+
         env.close()
 
 
