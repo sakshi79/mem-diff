@@ -17,26 +17,8 @@ class Lift2DEnv(gym.Env):
     metadata = {"render.modes": ["human", "rgb_array"], "video.frames_per_second": 10}
     reward_range = (0.0, 1.0)
 
-    def __init__(
-        self,
-        render_size: int = 96,
-        window_size: int = 512,
-        finger_length: float = 60.0,
-        finger_width: float = 14.0,
-        finger_gap_max: float = 42.0,
-        finger_gap_min: float = 18.0,
-        block_size: float = 36.0,
-        grasp_threshold: float = 58.0,
-        render_action: bool = True,
-        reset_to_state=None,
-    ):
-        self.cfg = Lift2DConfig(
-            window_size=window_size, render_size=render_size, render_action=render_action,
-            finger_length=finger_length, finger_width=finger_width,
-            finger_gap_max=finger_gap_max, finger_gap_min=finger_gap_min,
-            block_size=block_size, grasp_threshold=grasp_threshold,
-            control_hz=self.metadata["video.frames_per_second"],
-        )
+    def __init__(self, config: Lift2DConfig | None = None, reset_to_state=None, **overrides):
+        self.cfg = config if config is not None else Lift2DConfig(**overrides)
         self.reset_to_state = reset_to_state
         self.latest_action = None
         self._seed = None
@@ -51,9 +33,9 @@ class Lift2DEnv(gym.Env):
         self.block_shape = None
         self.contacts: ContactCounter | None = None
 
-        ws = window_size
+        ws, rs = self.cfg.window_size, self.cfg.render_size
         self.observation_space = spaces.Dict({
-            'image': spaces.Box(low=0, high=1, shape=(3, render_size, render_size), dtype=np.float32),
+            'image': spaces.Box(low=0, high=1, shape=(3, rs, rs), dtype=np.float32),
             'agent_pos': spaces.Box(low=0, high=ws, shape=(2,), dtype=np.float32),
         })
         self.action_space = spaces.Box(
@@ -113,10 +95,10 @@ class Lift2DEnv(gym.Env):
             tx, ty = float(action[0]), float(action[1])
             self.gripper.set_grip(np.clip(action[2], -1.0, 1.0))
             for _ in range(n_steps):
-                self.gripper.update_fingers()
-                self.gripper.update_grasp(self.block)
+                self.gripper.drive_fingers(dt)
                 self.gripper.drive_base((tx, ty), dt)
                 self.space.step(dt)
+            self.gripper.update_contacts(self.block_shape)
 
         reward = 1.0 if self.gripper.grasped else 0.0
         return self._get_obs(), reward, False, self._get_info()

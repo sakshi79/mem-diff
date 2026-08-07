@@ -14,6 +14,7 @@ def build_space(cfg: Lift2DConfig) -> pymunk.Space:
     # positive_y_is_up = False → y=0 TOP, gravity pulls toward positive y
     space.gravity = (0.0, cfg.gravity)
     space.damping = cfg.damping
+    space.iterations = cfg.solver_iterations
     return space
 
 def add_walls(space: pymunk.Space, size: float, thickness: float = 3.0):
