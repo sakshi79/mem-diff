@@ -48,11 +48,12 @@ class Gripper:
 
         # Prismatic slide along x in the base's local frame
         # base is kinematic so the jaw rides with the base and can only open/close.
-        reach = cfg.finger_gap_max + cfg.finger_width/2
+        open_reach = cfg.finger_gap_max + cfg.finger_width/2
+        close_reach = cfg.finger_gap_min + cfg.finger_width/2
         if side == "left":
-            groove_a, groove_b = Vec2d(-reach, 0), Vec2d(0,0)
+            groove_a, groove_b = Vec2d(-open_reach, 0), Vec2d(-close_reach,0)
         else:
-            groove_a, groove_b = Vec2d(0,0), Vec2d(reach, 0)
+            groove_a, groove_b = Vec2d(close_reach,0), Vec2d(open_reach, 0)
         groove = pymunk.GrooveJoint(self.base, body, groove_a, groove_b, Vec2d(0,0))
         gear = pymunk.GearJoint(self.base, body, 0.0, 1.0)  # lock jaw rotation
         self.space.add(groove, gear)
@@ -72,21 +73,36 @@ class Gripper:
 
     # ----------------------- per step/substep ----------------------
     def drive_fingers(self, dt):
-        """Force-limited jaw actuation. A closed grip commands a gap narrower than
-        the block, so the PD saturates at max_grip_force → steady friction hold."""
+        """Velocity-controlled jaw motor with a force limit. The servo commands the
+        finger's SLIDE velocity along the groove (v_finger - v_base), so it's decoupled
+        from the base's own motion — commanding "open" always drives the jaws outward
+        relative to the base, no matter how fast the base is being dragged."""
         cfg = self.cfg
-        t = (self.grip_value + 1.0) / 2.0
-        half_gap = cfg.finger_gap_max * (1.0 - t) + cfg.finger_gap_min * t
-        bx = self.base.position.x
-        targets = {
-            self.left:  bx - (half_gap + cfg.finger_width / 2.0),
-            self.right: bx + (half_gap + cfg.finger_width / 2.0),
-        }
-        for body, tgt_x in targets.items():
-            fx = cfg.k_grip * (tgt_x - body.position.x) - cfg.c_grip * body.velocity.x
+        v_dir = cfg.jaw_speed if self.grip_closed else -cfg.jaw_speed
+        base_vx = self.base.velocity.x
+        for body, sign in ((self.left, +1.0), (self.right, -1.0)):
+            v_target_slide = sign * v_dir              # inward when closing
+            v_slide = body.velocity.x - base_vx        # relative to base
+            fx = cfg.k_motor * (v_target_slide - v_slide)
             fx = float(np.clip(fx, -cfg.max_grip_force, cfg.max_grip_force))
             body.apply_force_at_world_point(Vec2d(fx, 0.0), body.position)
 
+
+        # DEBUG — remove once diagnosed
+        f = getattr(Gripper, "_dbg_f", None)
+        if f is None:
+            f = open("lift2d_debug.log", "w")
+            Gripper._dbg_f = f
+        bp, bv = self.base.position, self.base.velocity
+        Lp, Rp = self.left.position, self.right.position
+        Lv, Rv = self.left.velocity, self.right.velocity
+        f.write(
+            f"grip={self.grip_value:+.2f} v_dir={v_dir:+.0f} "
+            f"base=({bp.x:6.1f},{bp.y:6.1f}) bvel=({bv.x:+6.1f},{bv.y:+6.1f}) "
+            f"Llocal=({Lp.x-bp.x:+.1f},{Lp.y-bp.y:+.1f}) Lvel=({Lv.x:+6.1f},{Lv.y:+6.1f}) "
+            f"Rlocal=({Rp.x-bp.x:+.1f},{Rp.y-bp.y:+.1f}) Rvel=({Rv.x:+6.1f},{Rv.y:+6.1f})\n"
+        )
+        f.flush()
     def update_contacts(self, block_shape):
         def touching(shape):
             cps = shape.shapes_collide(block_shape)
@@ -106,11 +122,20 @@ class Gripper:
         if v.length > cfg.max_base_speed:
             v = v.normalized() * cfg.max_base_speed
         self.base.velocity = v
+        # Clamp position AND velocity at limits — otherwise a residual "into the wall"
+        # velocity keeps the groove joint under tension, which drags the fingers into
+        # the floor and creates a friction jam that pins them.
         m, ws = cfg.base_margin, cfg.window_size
-        self.base.position = Vec2d(
-            float(np.clip(self.base.position.x, m, ws-m)),
-            float(np.clip(self.base.position.y, m, ws-m))
-        )
+        px = float(np.clip(self.base.position.x, m, ws - m))
+        py = float(np.clip(self.base.position.y, m, ws - m))
+        vx, vy = self.base.velocity.x, self.base.velocity.y
+        if px <= m       and vx < 0: vx = 0.0
+        if px >= ws - m  and vx > 0: vx = 0.0
+        if py <= m       and vy < 0: vy = 0.0
+        if py >= ws - m  and vy > 0: vy = 0.0
+        self.base.position = Vec2d(px, py)
+        self.base.velocity = Vec2d(vx, vy)
+        
 
     def set_pose(self, position):
         cfg = self.cfg

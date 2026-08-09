@@ -44,9 +44,10 @@ class Lift2DConfig:
     k_v: float = 30.0
     base_margin: float = 35.0
 
-    # Finger (jaw) force control  (max_grip_force is COMPUTED in __post_init__)
-    k_grip:         float = 60.0    # jaw PD stiffness
-    c_grip:         float = 8.0     # jaw PD damping
+    # Finger (jaw) motor: velocity-controlled, force-limited.
+    # max_grip_force (COMPUTED in __post_init__) = per-jaw normal force N = S·m·g/(2μ).
+    jaw_speed: float = 200.0   # commanded open/close speed (px/s); impact knob — keep modest
+    k_motor:   float = 10.0    # velocity-servo gain (only needs k_motor·jaw_speed ≫ N)
 
     # base motion
     max_base_speed: float = 200.0   # cap so a held block isn't yanked past the friction limit

@@ -61,10 +61,13 @@ def main(output, render_size, window):
                 img = env.render_frame("human")
 
                 grasped_str = "GRASPED ●" if info["grasped"] else "         "
-                grip_str = "CLOSED" if controller.grip_closed else "open  "
+                g = env.gripper
+                gap = g.right.position.x - g.left.position.x
                 state_vec = np.concatenate([info["pos_agent"], info["block_pose"]])
-                print(f"\r  rew={reward:.3f}  block_y={info['block_pose'][1]:5.1f}  "
-                      f"grip={grip_str}  {grasped_str}  ", end="", flush=True)
+                print(f"\r grip_val={g.grip_value:+.2f} gap={gap:5.1f} "
+                      f"Lx={g.left.position.x:5.1f} Rx={g.right.position.x:5.1f} "
+                      f"block_x={info['block_pose'][0]:5.1f} {grasped_str}",
+                      end="", flush=True)
 
                 if replay_buffer is not None:
                     episode.append({"img": img,
