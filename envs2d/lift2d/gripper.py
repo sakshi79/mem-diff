@@ -41,7 +41,7 @@ class Gripper:
             self.base.position.y,
         )
         shape = pymunk.Poly.create_box(body, (cfg.finger_width, cfg.finger_length))
-        shape.friction = 1.8
+        shape.friction = cfg.finger_friction
         shape.elasticity = 0.0
         shape.color = (pygame.Color("SteelBlue") if side=="left" else pygame.Color("CornflowerBlue"))
         self.space.add(body, shape)

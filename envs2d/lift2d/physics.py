@@ -30,12 +30,12 @@ def add_walls(space: pymunk.Space, size: float, thickness: float = 3.0):
     return walls
 
 def make_block(space: pymunk.Space, cfg: Lift2DConfig, position):
-    mass = 1.0
+    mass = cfg.block_mass
     inertia = pymunk.moment_for_box(mass, (cfg.block_size, cfg.block_size))
     body = pymunk.Body(mass, inertia)
     body.position = Vec2d(*position)
     shape = pymunk.Poly.create_box(body, (cfg.block_size, cfg.block_size))
-    shape.friction = 1.5
+    shape.friction = cfg.block_friction
     shape.elasticity = 0.05
     shape.color = pygame.Color("Tomato")
     space.add(body, shape)
