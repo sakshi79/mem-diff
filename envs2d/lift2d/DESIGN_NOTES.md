@@ -72,11 +72,16 @@ like a real parallel-jaw gripper:
   base's x-axis — the open/close direction, and rides with the base otherwise) plus a
   **`GearJoint`** locking its rotation to the (non-rotating) base. Together these make each
   jaw a 1-DOF slider that can't sag under gravity or spin.
-- **Force-limited actuation** (`drive_fingers`): a closed grip commands a jaw gap
-  *narrower than the block* (`finger_gap_min=8 < block_size/2=18`), so the jaw PD
-  saturates at `max_grip_force` and presses the block with a steady normal force `N`.
-  Friction `μ·N` on both faces then holds the block. `finger_gap_min` **must** stay below
-  `block_size/2`, or the jaws stop flush against the block and exert zero squeeze.
+- **Velocity motor with force limit** (`drive_fingers`): each jaw is driven by a
+  *velocity-controlled motor*, not a position spring. Closed grip commands inward
+  slide speed `+jaw_speed`; open commands `-jaw_speed`. The motor applies
+  `k_motor·(v_target_slide − v_slide)` clipped to `±max_grip_force`. When the jaw
+  stalls against the block, the servo saturates and the clipped force **is** the
+  per-jaw normal `N`. Friction `μ·N` on both faces holds the block. `finger_gap_min`
+  is now the CLOSED-side groove stop; it **must** stay below `block_size/2`, or the
+  jaws hit the groove stop before touching the block and exert zero squeeze.
+  The velocity servo works in the **base's frame** — `v_slide = v_finger − v_base` —
+  so jaw actuation is decoupled from base motion. See §7 for how we got here.
 
 ### Grasp detection is contact-based
 `grasped = grip_closed AND left jaw touches block AND right jaw touches block`, tested with
