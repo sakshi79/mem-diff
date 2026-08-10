@@ -101,7 +101,9 @@ class Lift2DEnv(gym.Env):
                 self.space.step(dt)
             
 
-        reward = 1.0 if self.gripper.grasped else 0.0   # change this, reward should be on lift, not grasped
+        # Reward on successful lift: block above floor rest by ≥ lift_threshold pixels.
+        floor_rest_y = cfg.window_size - cfg.wall_thickness - cfg.block_size / 2
+        reward = 1.0 if self.block.position.y < floor_rest_y - cfg.lift_threshold else 0.0
         return self._get_obs(), reward, False, self._get_info()
 
     # ---- render / obs / info ----------------------------------------------
