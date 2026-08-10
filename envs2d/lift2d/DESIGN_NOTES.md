@@ -51,37 +51,43 @@ duplicated defaults, no drift.
 
 ## 4. The gripper
 
-### Kinematic base, PD-driven, speed-capped
-- The base is a **kinematic** body: the policy commands an absolute target `(tx, ty)` each
-  step and a PD controller drives the base toward it (`k_p=180`, `k_v=30`, slightly
-  overdamped for a crisp, non-oscillating approach).
-- **Base speed is capped (`max_base_speed=200`).** This is the key to a stable friction
-  grasp: without a cap, `k_p=180` yanks the gripper ~67px in a single control step — far
-  faster than friction can accelerate the block — so a lifted block slips out. Capping
-  *speed* (not lowering `k_p`) keeps positioning crisp while keeping acceleration inside
-  the friction budget. Trade-off: the gripper visibly lags a very fast cursor drag.
+### Kinematic base, direct position tracking
+- The base is a **kinematic** body: the policy commands an absolute target `(tx, ty)`
+  each step and `drive_base` **teleports** the base to that target (clamped to
+  arena-safe bounds derived from finger geometry). Pymunk's `base.velocity` is set
+  to zero so `space.step` does NOT re-integrate the motion; slip detection uses a
+  separately-tracked `_commanded_bvel` field.
+- **Clamp bounds are geometry-derived**, not a fixed margin. With the base at the top
+  of the fingers, `y_max = ws − wall_thickness − finger_length` (finger bottom just
+  touches the floor top), and `x_min/x_max = wall_thickness ± (finger_gap_max +
+  finger_width/2)` (fingers stay inside side walls at full open).
+- The base sits at the **top** of the fingers (base.y = finger top). Fingers hang
+  `finger_length` below the base.
 
-### Dynamic fingers = a real friction grasp (not a weld)
-We deliberately rejected the simpler "weld" grasp (pin the block to the base with a joint
-on contact). A weld is not physical — the block can't slip or rotate, and reward doesn't
-reflect real contact. Instead the block is held **purely by friction and normal force**,
-like a real parallel-jaw gripper:
+### Kinematic fingers with a slide-state motor (Plan B)
+The block is held by friction, but the fingers are not dynamic bodies — they're
+kinematic, positioned each substep from `base.position + slide_offset`. Each finger's
+`slide` (its distance from the base along the open/close axis, in `[finger_gap_min,
+finger_gap_max]`) is a scalar state we advance at `jaw_speed` and cap at block
+contact (predict-and-cap). The physical force chain — motor commands velocity →
+normal force `N` grows to `F_max` at equilibrium → friction `μ·N` holds — is modelled
+directly at the equilibrium (see "Force-balance model" below). Grip force `F_max`
+is the physics-computed value from §5.
 
-- Fingers are **dynamic** bodies (mass 0.5) so they can exert and feel contact forces.
-- Each finger is constrained to the base by a **`GrooveJoint`** (slides only along the
-  base's x-axis — the open/close direction, and rides with the base otherwise) plus a
-  **`GearJoint`** locking its rotation to the (non-rotating) base. Together these make each
-  jaw a 1-DOF slider that can't sag under gravity or spin.
-- **Velocity motor with force limit** (`drive_fingers`): each jaw is driven by a
-  *velocity-controlled motor*, not a position spring. Closed grip commands inward
-  slide speed `+jaw_speed`; open commands `-jaw_speed`. The motor applies
-  `k_motor·(v_target_slide − v_slide)` clipped to `±max_grip_force`. When the jaw
-  stalls against the block, the servo saturates and the clipped force **is** the
-  per-jaw normal `N`. Friction `μ·N` on both faces holds the block. `finger_gap_min`
-  is now the CLOSED-side groove stop; it **must** stay below `block_size/2`, or the
-  jaws hit the groove stop before touching the block and exert zero squeeze.
-  The velocity servo works in the **base's frame** — `v_slide = v_finger − v_base` —
-  so jaw actuation is decoupled from base motion. See §7 for how we got here.
+Finger shapes are **sensors** — pymunk will detect their overlap for our contact queries
+but will not apply contact response impulses to the block. All finger-block interaction
+is handled explicitly in `update_grasp`.
+
+### Grasp is an explicit state machine
+`grasped` is a boolean state on `Gripper`. Transitions:
+- **Enter:** `grip_closed AND both fingers stalled at block` → set `grasped = True`,
+  record `grasp_offset = block.position − base.position`.
+- **Exit:** `grip_closed = False` (grip release). *(Slip-based exit is currently
+  disabled — see §7.3.)*
+
+While `grasped`, the block is **position-synced** to the base each substep:
+`block.position = base.position + grasp_offset`, `block.velocity = base.velocity`,
+`block.angular_velocity = 0`. This makes the carry rigid.
 
 ### Force-balance model (how the grasp actually holds)
 
@@ -114,9 +120,13 @@ dynamic result to within one substep because the servo is already saturated in n
 use (`k_motor·jaw_speed = 2000 ≫ F_max = 454`). The `N = F_max` at contact is what the
 slip check spends as friction budget (`2·μ·F_max`).
 
-### Grasp detection is contact-based
-`grasped = grip_closed AND left jaw touches block AND right jaw touches block`, tested with
-`Shape.shapes_collide` (distance < 1px). There is no grasp joint; reward = 1.0 iff grasped.
+### Reward: successful lift, not just grasped
+`reward = 1.0` when the block is above the floor by at least `lift_threshold` pixels
+(default 50). Formally: `block.y < window − wall_thickness − block_size/2 −
+lift_threshold`. Reward stays 0 during the pickup transient (block still on floor while
+jaws close) and only turns on once the block has been carried upward — matching the
+task's "lift" semantics. There is no grasp joint; grasped/not-grasped is state, and
+lifting is what the reward measures.
 
 ## 5. Grip force is computed from physics, not tuned
 
@@ -250,6 +260,72 @@ Log tracing revealed the root causes:
   finger_mass = 454 / 0.5 = 908 px/s²`. Candidate fix (not yet applied): cap base
   acceleration to what the servo can compensate.
 
+### 7.3 Plan B: kinematic base + kinematic fingers, teleport tracking, explicit grasp
+
+**Roadblock.** Even after §7.1 and §7.2, the live gripper still felt like a soft body,
+not a rigid tool. Two symptoms:
+
+1. **Base–finger "spring."** During any fast base motion, the dynamic fingers lagged
+   the base (base's PD accel could reach ~18000 px/s² on cursor jumps; finger servo
+   maxed at `F_max/finger_mass = 454/0.5 = 908 px/s²`). Directional changes produced
+   ~100–200 ms of asymmetric finger drift — one finger drifted to its closed stop
+   while the other overshot outward. Visually the gripper "wobbled."
+2. **Base with virtual inertia.** The base was kinematic in pymunk terms but PD-driven,
+   which mathematically emulated a spring-damper. The user's mental model of "the
+   base is just a control point" didn't match. Why should a coordinate need inertia?
+
+**Implementation & why.** We rewrote both actuation layers as kinematic:
+
+- **Base:** teleport directly to the target each frame. `base.position = target`
+  (clamped to geometry-safe bounds); `base.velocity = (0, 0)`; commanded velocity
+  tracked in `_commanded_bvel` for downstream use. Pymunk's kinematic body semantics
+  — position advances by `velocity·dt` during `space.step` — would otherwise cause
+  double motion, so zeroing pymunk's velocity is essential.
+- **Fingers:** replaced dynamic bodies + `GrooveJoint` + `GearJoint` + velocity servo
+  with kinematic bodies whose positions are set each substep from `base.position +
+  slide_offset`. The velocity motor still exists conceptually — `slide_offset`
+  advances at `jaw_speed` per substep, capped at block contact (predict-and-cap).
+  Finger shapes made **sensors** so pymunk doesn't push the block on overlap.
+- **Grasp:** explicit state machine. `grasped=True` when grip is closed AND both
+  fingers are stalled at the block. Block is position-synced to base each substep.
+- **Geometry:** base moved to the top of fingers (was center). Fingers hang below.
+  Arena clamps recomputed from finger geometry so the finger bottom never dips
+  below the floor.
+- **Reward:** changed from "grasped" to "lifted" (block above `lift_threshold` px
+  from floor rest). Grasp is a mid-step state; lift is the task.
+
+**Outcome.**
+
+*What works, verified headless and live:*
+- Base tracks the mouse 1:1 — zero lag, no soft feel.
+- Fingers rigidly follow the base — no asymmetric drift, ever.
+- Grasp forms cleanly on close (both jaws stall at block).
+- Lift + carry + release cycle works (block rides with base through arbitrary
+  translations; falls to floor on release).
+- Finger geometry respects the floor (no digging).
+- Reward correctly gates on lift (0 during pickup, 1 once block is airborne past
+  `lift_threshold`, 0 once released and fallen back below it).
+
+*What's disabled and why (residual):*
+- **Physical slip check is off.** Direct position tracking produces infinite
+  instantaneous acceleration — any teleport by even a few pixels trips a real
+  friction-budget threshold `2μN/m ≈ 2451 px/s²` in one substep. EMA smoothing
+  (attempted at α=0.3) doesn't help because the *derivative* of a smoothed spike
+  is still a spike. Solutions require a fundamentally different formulation —
+  e.g., a velocity-based slip criterion tuned to teleop timescales, or a
+  smoothing/rate-limit layer on the *commanded target* before it reaches
+  `drive_base`. Deferred.
+
+*What we let go:*
+- **Emergent friction physics.** Grasp is now a state we choose, not something
+  pymunk discovers via contact impulses. Block spin during grasp is nullified
+  (`angular_velocity = 0`). This is cleaner and more predictable for data
+  collection, at the cost of losing block-wall bounces mid-carry and similar
+  emergent behavior.
+- **Dead code paths.** `k_p`, `k_v`, `base_margin`, `k_motor`, `max_base_speed`,
+  `finger_mass` are all commented out in config as Plan-A escape hatches. If we
+  ever revert to the dynamic-fingers model, they're one uncomment away.
+
 ## 8. Known limitations / realistic behavior
 
 - **Gross misalignment (≳ half a block off-center) spins the block** as a single jaw
@@ -267,11 +343,16 @@ Log tracing revealed the root causes:
 |----------|-------|-----|
 | `gravity` | 980 | centimeter-scale units |
 | `finger_gap_min` | 8 | < block half-width (18) so jaws squeeze, not rest flush |
+| `finger_length` | 60 | fingers hang this far below base; sets the y-max clamp |
 | `grip_safety_factor` | 2.5 | margin in the computed grip force `F = S·m·g/(2μ)` (≈454 N) |
 | `block_mass`, `finger_friction`, `block_friction` | 1.0, 1.8, 1.5 | physical inputs to the grip-force formula (and the shapes) |
-| `max_base_speed` | 200 | keeps lift/carry acceleration within the friction budget |
-| `solver_iterations` | 25 | reduce contact jitter |
-| `k_p`, `k_v` | 180, 30 | crisp, overdamped base positioning |
+| `jaw_speed` | 200 | slide-motor commanded speed (px/s) — controls how fast jaws open/close |
+| `lift_threshold` | 50 | block must be this far above floor rest for reward = 1 |
+| `solver_iterations` | 25 | reduce contact jitter (still applied to space) |
 
 > `max_grip_force` is **not** a config constant — it is computed in `__post_init__` from
 > `grip_safety_factor`, `block_mass`, `gravity`, and the two friction coefficients.
+
+> `k_p`, `k_v`, `base_margin`, `k_motor`, `max_base_speed`, `finger_mass` are commented
+> out in `config.py` — leftover knobs from the pre-Plan-B controllers. Kept as escape
+> hatches for potential future revert (see §7.3).
