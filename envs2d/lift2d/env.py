@@ -95,12 +95,13 @@ class Lift2DEnv(gym.Env):
             tx, ty = float(action[0]), float(action[1])
             self.gripper.set_grip(np.clip(action[2], -1.0, 1.0))
             for _ in range(n_steps):
-                self.gripper.drive_fingers(dt)
                 self.gripper.drive_base((tx, ty), dt)
+                self.gripper.drive_fingers(dt, self.block)
+                self.gripper.update_grasp(self.block, dt)
                 self.space.step(dt)
-            self.gripper.update_contacts(self.block_shape)
+            
 
-        reward = 1.0 if self.gripper.grasped else 0.0
+        reward = 1.0 if self.gripper.grasped else 0.0   # change this, reward should be on lift, not grasped
         return self._get_obs(), reward, False, self._get_info()
 
     # ---- render / obs / info ----------------------------------------------

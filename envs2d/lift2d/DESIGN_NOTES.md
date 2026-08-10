@@ -83,6 +83,37 @@ like a real parallel-jaw gripper:
   The velocity servo works in the **base's frame** — `v_slide = v_finger − v_base` —
   so jaw actuation is decoupled from base motion. See §7 for how we got here.
 
+### Force-balance model (how the grasp actually holds)
+
+The physical chain that lets a friction grasp work is the same regardless of whether we
+implement it with dynamic fingers + contact impulses or kinematic fingers + explicit
+state (see §7 for the implementation history):
+
+1. The motor commands the jaw's slide velocity `v = jaw_speed` (inward when closing).
+2. Free-moving, the jaw accelerates toward `v`.
+3. On contact with the block, a normal force `N` develops at the finger–block face.
+4. The motor's output is clamped at `F_max = max_grip_force` (physics-derived, §5), so
+   the maximum `N` the motor can sustain is `F_max`.
+5. Equilibrium: `N` grows until it balances `F_max` → net force on the jaw = 0 →
+   slide velocity → 0. The motor is now *stalled*: still commanding `v` but unable to
+   achieve it against the block.
+6. That sustained `N = F_max` per jaw is the "grip force." Friction at each contact
+   is `μ·N`. Total lateral friction available to resist block motion is `2·μ·N`.
+7. Slip: if the block's required lateral acceleration exceeds `2·μ·N / m_block`,
+   friction can't hold it — the grasp breaks.
+
+**Halted by normal force, not "by contact" per se.** Contact is just the geometric
+moment when `N` starts being non-zero; the *halting* is the force balance in step 5.
+
+**We model the equilibrium directly, not the transient.** Rather than dynamically
+simulating steps 3–5 (waiting for `N` to grow to `F_max` and the jaw to decelerate),
+we treat the equilibrium as an instant snap: whenever the commanded slide would put
+the finger inside the block, we cap it at the contact position. Equivalent to
+assuming the motor was saturated (`N = F_max`) the whole time, which matches the
+dynamic result to within one substep because the servo is already saturated in normal
+use (`k_motor·jaw_speed = 2000 ≫ F_max = 454`). The `N = F_max` at contact is what the
+slip check spends as friction budget (`2·μ·F_max`).
+
 ### Grasp detection is contact-based
 `grasped = grip_closed AND left jaw touches block AND right jaw touches block`, tested with
 `Shape.shapes_collide` (distance < 1px). There is no grasp joint; reward = 1.0 iff grasped.
@@ -133,7 +164,93 @@ clean physical statement.
   resets the scene *in the same window* instead of tearing down pygame and reopening a new
   window (the old loop re-constructed the env every episode).
 
-## 7. Known limitations / realistic behavior
+## 7. Design decision log (roadblock → implementation → outcome)
+
+Recent design changes, recorded only after implementation and verification. Each entry:
+what was broken, what we did and why, and what actually happened when we tested it.
+
+### 7.1 Velocity-motor jaws (replaced position-spring PD)
+
+**Roadblock.** The initial jaw controller was a position PD: `F = k_grip·(target − pos)`
+clipped to `max_grip_force`. To reach the stall force `F ≈ 454 N`, the spring had to be
+stretched by `F/k_grip = 454/60 ≈ 7.5 px` — i.e. the jaws were perpetually commanded
+**7.5 px INSIDE the block**, and the spring pushed back with `F` via the block's contact.
+This coupled *force to penetration*: hard "snap" on close, sustained over-press, and
+watermelon-seed extrusion under any asymmetric grip.
+
+**Implementation & why.** Replaced the position spring with a velocity-controlled motor
+(matches the mental model of a real force-limited servo motor):
+`fx = k_motor·(v_target_slide − v_slide)` clipped to `±max_grip_force`. When the jaw
+stalls against the block, the clip *is* the per-jaw normal force `N`; friction `μ·N`
+does the holding. Force is now decoupled from any position target — no spring stretch,
+no penetration coupling.
+
+**Outcome.** Verified live and headless: extrusion (previously reproducible with the
+spring) is gone at the physics-computed `F = S·m·g/(2μ) ≈ 454 N`. Grip on cube gives
+gap ≈ 50 (jaws touching cube's outer faces + finger width), lifts hold, releases clean.
+Note the servo saturates almost always in normal use (`k_motor·jaw_speed = 2000 ≫ 454`),
+so effectively the motor delivers `±max_grip_force` in the commanded direction until
+the finger is at the stop or in contact. That saturation matters for the next entry.
+
+### 7.2 Servo relative to base (Fix 1) + base velocity clamp at limits (Fix 2)
+
+**Roadblock.** Two failures appeared in the live demo that the headless stress suite
+had missed:
+
+1. **Self-closing under mouse drag.** Moving the gripper around with the mouse caused
+   the fingers to drift inward — sometimes to gap ≈ 64 (about the mid-open position),
+   *without touching the cube*. The gripper looked "soft" instead of rigid.
+2. **Floor jam.** Holding the mouse cursor below the arena (base pinned at its y-limit)
+   left the fingers stuck at asymmetric positions (one at closed stop, one at open),
+   unresponsive to grip toggling.
+
+Log tracing revealed the root causes:
+
+1. During fast base motion, the velocity servo compared the finger's *world* velocity
+   to `v_target`. When the base drags the finger at, say, `+169 px/s`, the finger's
+   world velocity matches, but that isn't the physical DOF the servo controls — the
+   *slide* along the groove is. The absolute servo could still saturate, but the
+   diagnosis was fuzzy.
+2. When base position was clamped at the arena limit but the PD kept trying to push
+   past, the base's velocity accumulated (`bvel.y = +118` in the log). The `GrooveJoint`
+   uses base velocity in its constraint computation, so it kept accelerating the fingers
+   downward — into the floor. The debug log showed the groove joint's y-constraint
+   *violated by 10 px* (`Llocal.y = +10.2`). That put the finger bottom 10 px inside
+   the floor's segment radius → huge normal force → floor-finger friction `μ×N`
+   dwarfed the servo's 454 N → fingers pinned laterally, wherever they happened to be.
+
+**Implementation & why.**
+
+- **Fix 1 — servo in the base's frame** (`gripper.py drive_fingers`):
+  compute `v_slide = body.velocity.x − base.velocity.x` and use that in the servo
+  error, instead of `body.velocity.x` alone. Physically correct: the servo controls
+  the *sliding* DOF along the groove, which is the actual motor axis; the base's
+  world motion shouldn't matter.
+- **Fix 2 — clamp base velocity at position limits** (`gripper.py drive_base`):
+  after clipping `base.position` to `[margin, ws − margin]`, zero the component of
+  `base.velocity` that would push further into the wall/floor. Removes the persistent
+  "into the wall" velocity that was straining the groove joint.
+
+**Outcome.**
+
+- **Fix 2 did the operational work.** With it, the floor jam is gone (headless: base
+  parked at y-limit → fingers stay at open stops, gap = 98). Live confirmation:
+  self-closing near/on the cube and floor-jam behavior both cleared.
+- **Fix 1, honestly, did NOT change behavior.** The servo saturates on any error
+  larger than `max_grip_force / k_motor = 454 / 10 = 45 px/s`. In practice, errors are
+  always far above 45, so both formulations clip to the same `±454`. We kept Fix 1
+  because it is the correct physical model — if `k_motor` is later raised or
+  `max_grip_force` lowered enough to un-saturate, only the relative servo tracks
+  cleanly. It just doesn't earn its keep right now.
+- **Residual to be addressed:** after an *abrupt base direction change* (mouse whip),
+  fingers overshoot asymmetrically for ~100–200 ms before returning to symmetric.
+  Log shows `Lloc` jumping from −49 (open) to −16 (closed) in one control step when
+  the base decelerates from `+184` to `−200` in one step — that's ~4000 px/s² of
+  deceleration, and the servo's max jaw acceleration is only `max_grip_force /
+  finger_mass = 454 / 0.5 = 908 px/s²`. Candidate fix (not yet applied): cap base
+  acceleration to what the servo can compensate.
+
+## 8. Known limitations / realistic behavior
 
 - **Gross misalignment (≳ half a block off-center) spins the block** as a single jaw
   catches a corner. This is realistic contact behavior, not a bug.
@@ -144,7 +261,7 @@ clean physical statement.
   (grip across x, off-center, lift+hold, smooth carry, 200-step idle, re-grip cycling,
   empty-air close, near-wall grips, adversarial toggling, 25/25 random picks).
 
-## 8. Key constants (see `config.py` for the full list)
+## 9. Key constants (see `config.py` for the full list)
 
 | constant | value | why |
 |----------|-------|-----|
