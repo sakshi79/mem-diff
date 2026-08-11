@@ -289,7 +289,8 @@ not a rigid tool. Two symptoms:
   with kinematic bodies whose positions are set each substep from `base.position +
   slide_offset`. The velocity motor still exists conceptually — `slide_offset`
   advances at `jaw_speed` per substep, capped at block contact (predict-and-cap).
-  Finger shapes made **sensors** so pymunk doesn't push the block on overlap.
+  Finger shapes were initially made **sensors** so pymunk doesn't push the block on
+  overlap (later reverted — see §7.4).
 - **Grasp:** explicit state machine. `grasped=True` when grip is closed AND both
   fingers are stalled at the block. Block is position-synced to base each substep.
 - **Geometry:** base moved to the top of fingers (was center). Fingers hang below.
