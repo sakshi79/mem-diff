@@ -74,9 +74,13 @@ normal force `N` grows to `F_max` at equilibrium → friction `μ·N` holds — 
 directly at the equilibrium (see "Force-balance model" below). Grip force `F_max`
 is the physics-computed value from §5.
 
-Finger shapes are **sensors** — pymunk will detect their overlap for our contact queries
-but will not apply contact response impulses to the block. All finger-block interaction
-is handled explicitly in `update_grasp`.
+Finger shapes are **not sensors** — pymunk applies natural collision response between
+the (kinematic) finger and the (dynamic) block. This lets the gripper push the block
+around when dragged into it while ungrasped, without any manual push logic on our side.
+Grasp-time interaction is handled by `update_grasp` position-syncing the block, and
+`_advance_slide` caps the finger inner face exactly at the block outer face — so during
+grasp there is no overlap for pymunk to fight against. (Original design used sensor
+shapes to avoid pymunk pushing during grasp; that caused tunneling — see §7.4.)
 
 ### Grasp is an explicit state machine
 `grasped` is a boolean state on `Gripper`. Transitions:
