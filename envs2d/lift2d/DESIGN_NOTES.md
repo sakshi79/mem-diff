@@ -51,12 +51,17 @@ duplicated defaults, no drift.
 
 ## 4. The gripper
 
-### Kinematic base, direct position tracking
+### Kinematic base, velocity-driven with per-substep cap
 - The base is a **kinematic** body: the policy commands an absolute target `(tx, ty)`
-  each step and `drive_base` **teleports** the base to that target (clamped to
-  arena-safe bounds derived from finger geometry). Pymunk's `base.velocity` is set
-  to zero so `space.step` does NOT re-integrate the motion; slip detection uses a
-  separately-tracked `_commanded_bvel` field.
+  each step and `drive_base` sets `base.velocity` toward the target (magnitude capped
+  at `max_base_speed`). Pymunk's `space.step` integrates position from this velocity —
+  we do **not** touch `base.position` directly. The contact solver uses the velocity
+  to compute correct push impulses when the finger meets a dynamic body.
+- **Per-substep motion cap** (`max_base_speed * dt`, currently 5 px/substep) keeps the
+  step small enough that finger and block always co-locate on any traversal, giving
+  the contact solver a chance to push the block instead of skipping past it (see §7.5
+  for why this matters, and why a naive cap without the velocity fix produced *worse*
+  tunneling).
 - **Clamp bounds are geometry-derived**, not a fixed margin. With the base at the top
   of the fingers, `y_max = ws − wall_thickness − finger_length` (finger bottom just
   touches the floor top), and `x_min/x_max = wall_thickness ± (finger_gap_max +
@@ -358,8 +363,56 @@ at zero separation, so no visible jitter.
 - **Residual: fast-motion tunneling.** For a per-substep base motion greater than
   roughly `block_size / 2`, the finger can still skip past the block in one physics
   step before pymunk's collision check runs. Concretely: at teleport-style motion
-  faster than ~1800 px/s, the discrete step outruns the collider. Candidate fix: cap
-  per-substep base motion (via `max_base_speed * dt < block_size`). Not yet applied.
+  faster than ~1800 px/s, the discrete step outruns the collider. Fix delivered in
+  §7.5.
+
+### 7.5 Anti-tunneling: velocity-driven base with per-substep motion cap
+
+**Roadblock.** §7.4 fixed the sensor-mode issue but left fast-motion skip-tunneling.
+The straightforward-looking fix — "cap the per-substep base displacement, keep the
+teleport-with-zero-velocity pattern from §7.3" — turned out to produce a **worse**
+kind of tunneling: **penetration tunneling.** Under the cap, the base advanced only
+5 px/substep, but with `base.velocity = 0`, pymunk's contact solver had no closing
+velocity from which to compute a push impulse. Only its slow position-based bias
+correction acted on the block. Over many substeps the finger accumulated overlap
+inside the block and eventually emerged on the other side without ever displacing
+it. Adding more substeps or lowering the cap made this worse, not better — more
+iterations of "penetrate a bit, get pushed back a bit, penetrate more."
+
+Root cause: the "zero pymunk velocity to avoid double motion" trick from §7.3 was
+tied to teleport semantics. When position jumped in one substep, the solver saw a
+stationary body at the new position and everything was fine. Once we started moving
+in small steps, the solver needed a real velocity to push the block.
+
+**Implementation & why.** Drove the base **only via velocity**, no direct position
+override: `self.base.velocity = Vec2d(step_x / dt, step_y / dt)` where `step_x/y` is
+the capped per-substep displacement. Pymunk's `space.step` integrates position from
+velocity — one motion, no double integration. The contact solver now sees a moving
+kinematic finger and produces the correct closing-velocity impulse on the dynamic
+block. `_sync_finger_positions` propagates the same velocity to the finger bodies so
+they move in lockstep during `space.step`.
+
+Kept the per-substep motion cap for skip-tunneling prevention. `max_base_speed = 500 px/s`
+= 5 px/substep, comfortably below `block_size = 36` — so finger and block always
+co-locate for at least a handful of substeps on any traversal, giving the contact
+solver ample opportunity to push.
+
+**Outcome.**
+- **Slow drag pushes block correctly.** Headless: dragging the open gripper from
+  `x=100` to `x=340` across a block at `x=300` moves the block along to `x≈490`.
+- **Fast drag capped, still pushes.** A one-frame 400-px cursor jump caps the base
+  at 5 px/substep (= 50 px/control-step); over 10 control steps the base reaches the
+  target and the block gets shoved from `x=300` to `x≈485`. No tunneling.
+- **Grasp cycle unchanged.** Approach, close, lift, carry, release still all work.
+- **Trade-off — visible tracking lag on big cursor flicks.** A 400-px flick takes
+  ~0.8 s to catch up at 500 px/s. If snappier tracking is wanted, raise
+  `max_base_speed`. Anything below `block_size / dt = 3600 px/s` is provably
+  tunnel-free by the block-width argument; 1500 px/s is a comfortable middle ground.
+
+**Note on `_commanded_bvel`.** The field is now literally `= self.base.velocity`.
+Kept for future-proofing (if we revisit slip detection or reintroduce a distinction
+between "commanded" and "actual" base motion), and because the update_grasp code
+still references it for the EMA smoothing bookkeeping — harmless no-op currently.
 
 ## 8. Known limitations / realistic behavior
 
@@ -382,12 +435,13 @@ at zero separation, so no visible jitter.
 | `grip_safety_factor` | 2.5 | margin in the computed grip force `F = S·m·g/(2μ)` (≈454 N) |
 | `block_mass`, `finger_friction`, `block_friction` | 1.0, 1.8, 1.5 | physical inputs to the grip-force formula (and the shapes) |
 | `jaw_speed` | 200 | slide-motor commanded speed (px/s) — controls how fast jaws open/close |
+| `max_base_speed` | 500 | anti-tunneling cap on per-substep base motion (§7.5). Must stay below `block_size / dt = 3600 px/s` |
 | `lift_threshold` | 50 | block must be this far above floor rest for reward = 1 |
 | `solver_iterations` | 25 | reduce contact jitter (still applied to space) |
 
 > `max_grip_force` is **not** a config constant — it is computed in `__post_init__` from
 > `grip_safety_factor`, `block_mass`, `gravity`, and the two friction coefficients.
 
-> `k_p`, `k_v`, `base_margin`, `k_motor`, `max_base_speed`, `finger_mass` are commented
-> out in `config.py` — leftover knobs from the pre-Plan-B controllers. Kept as escape
-> hatches for potential future revert (see §7.3).
+> `k_p`, `k_v`, `base_margin`, `k_motor`, `finger_mass` are leftover knobs from the
+> pre-Plan-B controllers (see §7.3). They may be commented out or left in `config.py`
+> as escape hatches — nothing in the current code paths references them.

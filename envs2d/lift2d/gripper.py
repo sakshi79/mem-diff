@@ -173,8 +173,6 @@ class Gripper:
 
 
     def drive_base(self, target, dt: float):
-        """Teleport base to target. Track commanded velocity for slip check;
-        keep pymunk's velocity at 0 so space.step does NOT integrate a second motion."""
         cfg = self.cfg
         ws = cfg.window_size
         wt = cfg.wall_thickness

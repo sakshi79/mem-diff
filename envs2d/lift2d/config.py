@@ -53,7 +53,8 @@ class Lift2DConfig:
     k_motor:   float = 10.0    # velocity-servo gain (only needs k_motor·jaw_speed ≫ N)
 
     # base motion
-    max_base_speed: float = 500.0   # cap so a held block isn't yanked past the friction limit
+    max_base_speed: float = 200.0 # a speed cap ensures solver gets enough time to solve constraints
+    # prevents issues like tunneling effect
 
     def __post_init__(self):
         # Hold the block by friction on BOTH faces: 2·μ·F ≥ m·g
