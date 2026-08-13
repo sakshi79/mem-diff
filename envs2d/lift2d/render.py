@@ -56,16 +56,16 @@ class Renderer:
             if gripper.grasped:
                 canvas.blit(font.render("● GRASPED", True, (255, 220, 50)), (10, 10))
             
-            bar_x, bar_y, bar_w, bar_h = 10, ws - 22, 140, 12
-            pygame.draw.rect(canvas, (50, 50, 60), (bar_x, bar_y, bar_w, bar_h))
-            fill_w = int((gripper.grip_value + 1) / 2 * bar_w)
-            g_color = (80, 210, 110) if gripper.grip_closed else (210, 80, 80)
-            pygame.draw.rect(canvas, g_color, (bar_x, bar_y, fill_w, bar_h))
-            pygame.draw.rect(canvas, (120, 120, 130), (bar_x, bar_y, bar_w, bar_h), 1)
-            canvas.blit(
-                font.render(f"grip {gripper.grip_value:+.2f}", True, (200, 200, 200)),
-                (bar_x + bar_w + 6, bar_y),
-            )
+            # bar_x, bar_y, bar_w, bar_h = 10, ws - 22, 140, 12
+            # pygame.draw.rect(canvas, (50, 50, 60), (bar_x, bar_y, bar_w, bar_h))
+            # fill_w = int((gripper.grip_value + 1) / 2 * bar_w)
+            # g_color = (80, 210, 110) if gripper.grip_closed else (210, 80, 80)
+            # pygame.draw.rect(canvas, g_color, (bar_x, bar_y, fill_w, bar_h))
+            # pygame.draw.rect(canvas, (120, 120, 130), (bar_x, bar_y, bar_w, bar_h), 1)
+            # canvas.blit(
+            #     font.render(f"grip {gripper.grip_value:+.2f}", True, (200, 200, 200)),
+            #     (bar_x + bar_w + 6, bar_y),
+            # )
         except Exception:
             pass
             

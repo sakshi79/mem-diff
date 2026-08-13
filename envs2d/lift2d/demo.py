@@ -16,7 +16,7 @@ def _print_help():
     print("  Right click       : toggle gripper open / closed")
     print("  ↑ ↓ ← → (additive): also move gripper")
     print("  SPACE (toggle)    : also open / close gripper")
-    print("  R                 : retry")
+    print("  R                 : reset env")
     print("  Q / Escape        : quit")
     print("=" * 58)
 

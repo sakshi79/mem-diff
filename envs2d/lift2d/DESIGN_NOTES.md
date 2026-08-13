@@ -331,6 +331,36 @@ not a rigid tool. Two symptoms:
   `finger_mass` are all commented out in config as Plan-A escape hatches. If we
   ever revert to the dynamic-fingers model, they're one uncomment away.
 
+### 7.4 Non-sensor fingers — let pymunk push the block
+
+**Roadblock.** Plan B's initial version set `shape.sensor = True` on the finger shapes
+so pymunk would detect finger–block overlap but not apply contact-response impulses to
+the block. The reasoning: we handle grasp transport ourselves in `update_grasp`, so we
+didn't want pymunk fighting us with corrective push forces during a grip. Unintended
+consequence: when the gripper drags the finger *into* an ungrasped block (e.g., moving
+sideways with jaws open past a floor block), pymunk saw the overlap but did nothing.
+Finger passed through the block cleanly. Tunneling at any speed.
+
+**Implementation & why.** Removed the `sensor = True` flag. Finger shapes are now
+ordinary collision shapes. Kinematic finger (infinite effective mass) meeting a dynamic
+block causes pymunk to push the block naturally — the correct behavior for a "solid
+tool" bumping into a "solid object." Grasp interaction was already safe: `_advance_slide`
+caps the finger inner face exactly at the block outer face (distance 0), and
+`update_grasp` sets `block.position = base + grasp_offset` and `block.velocity =
+base.velocity` every substep. Pymunk's contact resolution has nothing to fight against
+at zero separation, so no visible jitter.
+
+**Outcome.**
+- **Slow-motion push works.** Dragging the open gripper into a floor block shoves the
+  block along instead of passing through. Live-verified.
+- **Grasp cycle unchanged.** Approach, close, lift, carry, release all still work; no
+  jitter during the transported carry.
+- **Residual: fast-motion tunneling.** For a per-substep base motion greater than
+  roughly `block_size / 2`, the finger can still skip past the block in one physics
+  step before pymunk's collision check runs. Concretely: at teleport-style motion
+  faster than ~1800 px/s, the discrete step outruns the collider. Candidate fix: cap
+  per-substep base motion (via `max_base_speed * dt < block_size`). Not yet applied.
+
 ## 8. Known limitations / realistic behavior
 
 - **Gross misalignment (≳ half a block off-center) spins the block** as a single jaw
