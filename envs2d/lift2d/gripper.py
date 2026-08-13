@@ -183,12 +183,24 @@ class Gripper:
         reach = cfg.finger_gap_max + cfg.finger_width / 2
         x_min, x_max = wt + reach, ws - wt - reach
         y_min, y_max = wt, ws - wt - cfg.finger_length
-        new_x = float(np.clip(target[0], x_min, x_max))
-        new_y = float(np.clip(target[1], y_min, y_max))
+        tx = float(np.clip(target[0], x_min, x_max))
+        ty = float(np.clip(target[1], y_min, y_max))
         old_pos = self.base.position
-        self._commanded_bvel = Vec2d((new_x - old_pos.x)/dt, (new_y - old_pos.y)/dt)
-        self.base.position = Vec2d(new_x, new_y)
-        self.base.velocity = Vec2d(0, 0)
+        dx = tx - old_pos.x
+        dy = ty - old_pos.y
+        dist = float(np.hypot(dx, dy))
+        max_step = cfg.max_base_speed * dt
+        # Bound this substep's motion — small enough for pymunk to catch contacts.
+        if dist > max_step:
+            scale = max_step / dist
+            # new_x = old_pos.x + dx*scale
+            # new_y = old_pos.y + dy*scale
+        else:
+            scale = 1.0
+        step_x = dx*scale
+        step_y = dy*scale
+        self.base.velocity = Vec2d(step_x/dt, step_y/dt)
+        self._commanded_bvel = self.base.velocity
         
 
     def set_pose(self, position):
