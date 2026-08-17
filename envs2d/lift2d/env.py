@@ -104,7 +104,8 @@ class Lift2DEnv(gym.Env):
         # Reward on successful lift: block above floor rest by ≥ lift_threshold pixels.
         floor_rest_y = cfg.window_size - cfg.wall_thickness - cfg.block_size / 2
         lifted = self.block.position.y < floor_rest_y - cfg.lift_threshold 
-        reward = 1.0 if (lifted and self.gripper.grasped) else 0.0
+        reward = 1.0 if lifted else 0.0 # robomimic style
+        # reward = 1.0 if (lifted and self.gripper.grasped) else 0.0  # physically more accurate
         return self._get_obs(), reward, False, self._get_info()
 
     # ---- render / obs / info ----------------------------------------------

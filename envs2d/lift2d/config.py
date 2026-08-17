@@ -37,8 +37,10 @@ class Lift2DConfig:
     grip_close_threshold: float = 0.3
     grip_safety_factor:   float = 2.5   # margin over the minimum holding force
 
-    # task success: reward = 1 when block is lifted ≥ lift_threshold pixels above floor rest
-    lift_threshold: float = 50.0
+    # task success: reward = 1 when block is lifted ≥ lift_threshold above floor rest
+    # Matches robomimic Lift (0.04 m); our units are ~cm, so 4.0.
+    lift_threshold: float = 4.0
+    # lift_threshold: float = 50.0
 
     # control params
     sim_hz: int = 100

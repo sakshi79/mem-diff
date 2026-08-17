@@ -60,7 +60,7 @@ def main(output, render_size, window):
                 obs, reward, done, info = env.step(act)
                 img = env.render_frame("human")
 
-                grasped_str = "GRASPED ●" if info["grasped"] else "         "
+                # grasped_str = "GRASPED ●" if info["grasped"] else "         "
                 g = env.gripper
                 gap = g.right.position.x - g.left.position.x
                 state_vec = np.concatenate([info["pos_agent"], info["block_pose"]])
