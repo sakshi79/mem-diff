@@ -50,7 +50,8 @@ class Lift2DConfig:
     base_margin: float = 35.0
 
     # Our horizon is 200 @ control_hz=10 = 20s
-    # Robomimic 3D has horizon = 400 @ robosuite's 20Hz, ie 200 steps (steps = horizon/control_freq) — (DESIGN_NOTES.md §7.6)
+    # Robomimic 3D has horizon = 400 @ robosuite's 20Hz, ie 200 steps (DESIGN_NOTES.md §7.6)
+    # 400 steps @ robosuite's 20Hz control_freq = 20s of real time. (steps = horizon/control_freq)
     # Our control_hz=10, hence for same steps, horizon = 200. Reducing this since our env is also simpler due to less DOF
     horizon: int = 150  # episode length, in env.step() calls
 
