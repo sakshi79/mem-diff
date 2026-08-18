@@ -65,6 +65,7 @@ class Lift2DEnv(gym.Env):
 
     def reset(self):
         self._setup()
+        self._elapsed_steps = 0
         state = self.reset_to_state
         if state is None:
             rs, ws = self.np_random, self.cfg.window_size
@@ -87,8 +88,9 @@ class Lift2DEnv(gym.Env):
     def step(self, action):
         cfg = self.cfg
         dt = 1.0 / cfg.sim_hz
-        n_steps = cfg.sim_hz // cfg.control_hz
+        n_steps = cfg.sim_hz // cfg.control_hz  
         self.contacts.reset()
+        self._elapsed_steps += 1
 
         if action is not None:
             self.latest_action = np.asarray(action, dtype=np.float32).copy()
@@ -106,7 +108,8 @@ class Lift2DEnv(gym.Env):
         lifted = self.block.position.y < floor_rest_y - cfg.lift_threshold 
         reward = 1.0 if lifted else 0.0 # robomimic style
         # reward = 1.0 if (lifted and self.gripper.grasped) else 0.0  # physically more accurate
-        return self._get_obs(), reward, False, self._get_info()
+        done = self._elapsed_steps >= cfg.horizon
+        return self._get_obs(), reward, done, self._get_info()
 
     # ---- render / obs / info ----------------------------------------------
 

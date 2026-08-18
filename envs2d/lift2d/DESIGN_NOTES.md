@@ -414,6 +414,40 @@ Kept for future-proofing (if we revisit slip detection or reintroduce a distinct
 between "commanded" and "actual" base motion), and because the update_grasp code
 still references it for the EMA smoothing bookkeeping — harmless no-op currently.
 
+### 7.6 Horizon-based truncation
+
+**Roadblock.** `step()` always returned `done=False` — there was no mechanism to end
+an episode at all; every episode ran forever until the caller gave up.
+
+**Implementation & why.** Added an `_elapsed_steps` counter (reset in `reset()`,
+incremented in `step()`) and set `done = self._elapsed_steps >= cfg.horizon`. This
+mirrors robosuite's own `_post_action`: `self.done = (self.timestep >= self.horizon)`
+— a single `done` flag, no separate `terminated`/`truncated` signal.
+
+We considered migrating to gymnasium's `terminated`/`truncated` split instead, but
+rejected it: this repo's training pipeline (`diffusion_policy/gym_util/
+multistep_wrapper.py`, `video_wrapper.py`, `sync_vector_env.py`, `async_vector_env.py`)
+is built entirely on old gym's 4-tuple `step()` / plain-obs `reset()` contract, and none
+of it is used for value-based RL — the only case where conflating "timed out" with
+"actually terminal" causes a real bug (TD bootstrapping across `done`). Since this env
+only feeds diffusion-policy-style imitation learning, there's no bootstrap to get
+wrong, so old gym's single `done` costs nothing. Matches robomimic's own choice, which
+stays on old gym and even sets `ignore_done=True` to manage horizon entirely outside
+the env.
+
+`horizon` picked by duration-matching robomimic's Lift task, then trimming a margin:
+robomimic's `ph` (proficient-human) Lift dataset registers `horizon=400`
+(`robomimic/__init__.py`), evaluated at robosuite's default `control_freq=20` Hz →
+20 seconds of sim time. At Lift2D's `control_hz=10`, matching that duration is `200`
+steps — we set `horizon=150` instead, 50 steps (5s) below the duration-matched value,
+since Lift2D has far fewer DOF (2D, no arm redundancy) and a shorter reach-grasp-lift
+sequence than robosuite's Lift, so the full 20s budget was judged unnecessary — but
+kept most of the margin rather than halving it, since the exact task difficulty
+relative to robosuite's Lift hasn't been measured yet.
+
+**Outcome.** Pending — not yet run/verified. Fill in once episodes have been observed
+to truncate at 150 steps without cutting off a normal lift-and-carry sequence.
+
 ## 8. Known limitations / realistic behavior
 
 - **Gross misalignment (≳ half a block off-center) spins the block** as a single jaw
@@ -438,6 +472,7 @@ still references it for the EMA smoothing bookkeeping — harmless no-op current
 | `max_base_speed` | 500 | anti-tunneling cap on per-substep base motion (§7.5). Must stay below `block_size / dt = 3600 px/s` |
 | `lift_threshold` | 50 | block must be this far above floor rest for reward = 1 |
 | `solver_iterations` | 25 | reduce contact jitter (still applied to space) |
+| `horizon` | 150 | episode length in control steps; 50 steps (5s) below the robomimic-Lift duration-matched value of 200 (§7.6) |
 
 > `max_grip_force` is **not** a config constant — it is computed in `__post_init__` from
 > `grip_safety_factor`, `block_mass`, `gravity`, and the two friction coefficients.

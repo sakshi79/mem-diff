@@ -49,6 +49,11 @@ class Lift2DConfig:
     k_v: float = 30.0
     base_margin: float = 35.0
 
+    # Our horizon is 200 @ control_hz=10 = 20s
+    # Robomimic 3D has horizon = 400 @ robosuite's 20Hz, ie 200 steps (steps = horizon/control_freq) — (DESIGN_NOTES.md §7.6)
+    # Our control_hz=10, hence for same steps, horizon = 200. Reducing this since our env is also simpler due to less DOF
+    horizon: int = 150  # episode length, in env.step() calls
+
     # Finger (jaw) motor: velocity-controlled, force-limited.
     # max_grip_force (COMPUTED in __post_init__) = per-jaw normal force N = S·m·g/(2μ).
     jaw_speed: float = 200.0   # commanded open/close speed (px/s); impact knob — keep modest
